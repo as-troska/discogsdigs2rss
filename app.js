@@ -1,0 +1,329 @@
+const express = require('express');
+const puppeteer = require('puppeteer');
+const initSqlJs = require('sql.js');
+const fs = require('fs');
+const path = require('path');
+const testData = require('./test-data');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const DB_PATH = path.join(__dirname, process.env.DATA_DIR || '.', 'digs.db');
+const USE_TEST_DATA = process.env.USE_TEST_DATA === 'true';
+
+let db;
+let browser;
+
+// Initialize SQLite database
+async function initDatabase() {
+  const SQL = await initSqlJs();
+  
+  // Load existing database or create new one
+  if (fs.existsSync(DB_PATH)) {
+    const buffer = fs.readFileSync(DB_PATH);
+    db = new SQL.Database(buffer);
+  } else {
+    db = new SQL.Database();
+  }
+  
+  // Create table for storing digs (articles about music)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS digs (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      link TEXT NOT NULL,
+      description TEXT,
+      pubDate TEXT NOT NULL,
+      imageUrl TEXT,
+      author TEXT,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  
+  saveDatabase();
+}
+
+// Save database to disk
+function saveDatabase() {
+  const data = db.export();
+  const buffer = Buffer.from(data);
+  fs.writeFileSync(DB_PATH, buffer);
+}
+
+// Helper functions for database operations
+function insertDig(id, title, link, description, pubDate, imageUrl, author) {
+  db.run(
+    'INSERT OR REPLACE INTO digs (id, title, link, description, pubDate, imageUrl, author) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [id, title, link, description, pubDate, imageUrl, author]
+  );
+  saveDatabase();
+}
+
+function getAllDigs() {
+  const stmt = db.prepare('SELECT * FROM digs ORDER BY pubDate DESC LIMIT 50');
+  const digs = [];
+  while (stmt.step()) {
+    digs.push(stmt.getAsObject());
+  }
+  stmt.free();
+  return digs;
+}
+
+// Fetch and parse Discogs Digs page with Puppeteer
+async function fetchDigsData() {
+  let page;
+  try {
+    // Use test data if enabled
+    if (USE_TEST_DATA) {
+      console.log('Using test data...');
+      for (const dig of testData) {
+        insertDig(
+          dig.id,
+          dig.title,
+          dig.link,
+          dig.description,
+          dig.pubDate,
+          dig.imageUrl,
+          dig.author
+        );
+      }
+      console.log(`Successfully loaded ${testData.length} test articles`);
+      return testData.length;
+    }
+    
+    console.log('Fetching from Discogs with Puppeteer... (this may take a moment)');
+    
+    // Initialize browser if not already running
+    if (!browser) {
+      browser = await puppeteer.launch({
+        headless: 'new',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--disable-gpu'
+        ]
+      });
+    }
+    
+    page = await browser.newPage();
+    
+    // Set viewport and user agent
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    
+    // Random delay to seem more human
+    const delay = 2000 + Math.random() * 3000;
+    await new Promise(resolve => setTimeout(resolve, delay));
+    
+    // Navigate to page
+    console.log('Navigating to Discogs Digs...');
+    await page.goto('https://www.discogs.com/digs', {
+      waitUntil: 'networkidle2',
+      timeout: 30000
+    });
+    
+    // Wait a bit for dynamic content
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Extract articles from the page
+    const digs = await page.evaluate(() => {
+      const articles = [];
+      
+      // Try multiple selectors
+      const selectors = ['article', '.card', '.dig', '.post'];
+      let elements = [];
+      
+      for (const selector of selectors) {
+        elements = Array.from(document.querySelectorAll(selector));
+        if (elements.length > 0) break;
+      }
+      
+      elements.forEach((element, index) => {
+        try {
+          // Try to find title
+          const titleEl = element.querySelector('h1, h2, h3, h4, .title, [class*="title"]');
+          const title = titleEl ? titleEl.textContent.trim() : '';
+          
+          // Try to find link
+          const linkEl = element.querySelector('a');
+          const link = linkEl ? linkEl.href : '';
+          
+          // Try to find image
+          const imgEl = element.querySelector('img');
+          const imageUrl = imgEl ? (imgEl.src || imgEl.dataset.src || '') : '';
+          
+          // Try to find description
+          const descEl = element.querySelector('p, .description, .excerpt, [class*="description"]');
+          const description = descEl ? descEl.textContent.trim() : '';
+          
+          // Try to find author
+          const authorEl = element.querySelector('.author, .byline, [class*="author"]');
+          const author = authorEl ? authorEl.textContent.trim() : 'Discogs';
+          
+          if (title && link) {
+            const id = link.split('/').pop() || `dig-${Date.now()}-${index}`;
+            articles.push({
+              id,
+              title,
+              link,
+              description,
+              imageUrl,
+              author,
+              pubDate: new Date().toISOString()
+            });
+          }
+        } catch (err) {
+          console.error('Error parsing article:', err);
+        }
+      });
+      
+      return articles;
+    });
+    
+    await page.close();
+    
+    // Store in database
+    for (const dig of digs) {
+      insertDig(
+        dig.id,
+        dig.title,
+        dig.link,
+        dig.description,
+        dig.pubDate,
+        dig.imageUrl,
+        dig.author
+      );
+    }
+    
+    console.log(`Successfully fetched ${digs.length} digs from Discogs`);
+    return digs.length;
+  } catch (error) {
+    console.error('Error fetching digs:', error.message);
+    if (page) await page.close().catch(() => {});
+    
+    // Return count from database instead if fetch fails
+    const existingDigs = getAllDigs();
+    return existingDigs.length;
+  }
+}
+
+// Generate RSS feed
+function generateRSS(digs) {
+  const items = digs.map(dig => `
+    <item>
+      <title><![CDATA[${dig.title}]]></title>
+      <link>${dig.link}</link>
+      <guid isPermaLink="true">${dig.link}</guid>
+      <pubDate>${new Date(dig.pubDate).toUTCString()}</pubDate>
+      ${dig.author ? `<author>${dig.author}</author>` : ''}
+      ${dig.description ? `<description><![CDATA[${dig.description}]]></description>` : ''}
+      ${dig.imageUrl ? `<enclosure url="${dig.imageUrl}" type="image/jpeg"/>` : ''}
+    </item>
+  `).join('');
+  
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Discogs Digs RSS Feed</title>
+    <link>https://www.discogs.com/digs</link>
+    <description>Latest articles from Discogs Digs</description>
+    <language>en</language>
+    <lastBuildDate>${new Date().toUTCString()}</lastBuildDate>
+    <atom:link href="${process.env.BASE_URL || 'http://localhost:' + PORT}/rss" rel="self" type="application/rss+xml"/>
+    ${items}
+  </channel>
+</rss>`;
+}
+
+// Routes
+app.get('/rss', async (req, res) => {
+  try {
+    // Just serve from database, don't fetch on every request
+    const digs = getAllDigs();
+    
+    if (digs.length === 0) {
+      res.status(503).send('RSS feed temporarily unavailable - no data cached');
+      return;
+    }
+    
+    // Generate RSS feed
+    const rss = generateRSS(digs);
+    
+    res.type('application/rss+xml');
+    res.send(rss);
+  } catch (error) {
+    console.error('Error in /rss route:', error.message);
+    res.status(500).send('Error generating RSS feed');
+  }
+});
+
+app.get('/', (req, res) => {
+  const digs = getAllDigs();
+  const lastUpdate = digs.length > 0 ? new Date(digs[0].createdAt).toLocaleString() : 'Never';
+  res.send(`
+    <h1>Discogs Digs RSS Feed</h1>
+    <p>RSS feed available at: <a href="/rss">/rss</a></p>
+    <p>Articles in database: ${digs.length}</p>
+    <p>Last update: ${lastUpdate}</p>
+    <p><a href="/update">Force update now</a> (use sparingly)</p>
+  `);
+});
+
+app.get('/update', async (req, res) => {
+  try {
+    console.log('Manual update requested...');
+    const count = await fetchDigsData();
+    res.send(`Updated! Fetched ${count} articles. <a href="/">Back</a>`);
+  } catch (error) {
+    res.status(500).send(`Error: ${error.message}. <a href="/">Back</a>`);
+  }
+});
+
+// Update digs every 2 hours (to be respectful to Discogs)
+setInterval(async () => {
+  try {
+    console.log('Starting scheduled update...');
+    const count = await fetchDigsData();
+    console.log(`Updated ${count} digs at ${new Date().toLocaleString()}`);
+  } catch (error) {
+    console.error('Error updating digs:', error.message);
+  }
+}, 2 * 60 * 60 * 1000); // 2 hours
+
+// Start server
+async function startServer() {
+  await initDatabase();
+  
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`RSS feed available at http://localhost:${PORT}/rss`);
+    
+    // Initial fetch
+    fetchDigsData().then(count => {
+      console.log(`Initial fetch: ${count} digs loaded`);
+    }).catch(err => {
+      console.error('Initial fetch failed:', err.message);
+    });
+  });
+}
+
+startServer().catch(err => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('\nShutting down gracefully...');
+  if (browser) {
+    await browser.close();
+  }
+  if (db) {
+    db.close();
+  }
+  process.exit(0);
+});
+
+
+

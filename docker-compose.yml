@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  discogs-digs-rss:
+    build: .
+    container_name: discogs-digs-rss
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
