@@ -5,7 +5,7 @@ services:
     build: .
     container_name: discogs-digs-rss
     ports:
-      - "3000:3000"
+      - "4000:3000"
     volumes:
       - ./data:/app/data
     environment:
