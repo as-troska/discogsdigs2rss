@@ -30,9 +30,9 @@ async function initDatabase() {
     CREATE TABLE IF NOT EXISTS digs (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
-      link TEXT NOT NULL,
+      link TEXT NOT NULL UNIQUE,
       description TEXT,
-      pubDate TEXT NOT NULL,
+      pubDate TEXT,
       imageUrl TEXT,
       author TEXT,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -51,15 +51,23 @@ function saveDatabase() {
 
 // Helper functions for database operations
 function insertDig(id, title, link, description, pubDate, imageUrl, author) {
-  db.run(
-    'INSERT OR REPLACE INTO digs (id, title, link, description, pubDate, imageUrl, author) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    [id, title, link, description, pubDate, imageUrl, author]
-  );
-  saveDatabase();
+  // Check if this link already exists
+  const stmt = db.prepare('SELECT id FROM digs WHERE link = ?');
+  const exists = stmt.step();
+  stmt.free();
+  
+  if (!exists) {
+    // Only insert if it's new
+    db.run(
+      'INSERT INTO digs (id, title, link, description, pubDate, imageUrl, author) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id, title, link, description, pubDate || new Date().toISOString(), imageUrl, author]
+    );
+    saveDatabase();
+  }
 }
 
 function getAllDigs() {
-  const stmt = db.prepare('SELECT * FROM digs ORDER BY pubDate DESC LIMIT 50');
+  const stmt = db.prepare('SELECT * FROM digs ORDER BY pubDate DESC NULLS LAST');
   const digs = [];
   while (stmt.step()) {
     digs.push(stmt.getAsObject());
@@ -161,6 +169,18 @@ async function fetchDigsData() {
           const authorEl = element.querySelector('.author, .byline, [class*="author"]');
           const author = authorEl ? authorEl.textContent.trim() : 'Discogs';
           
+          // Try to find published date
+          const dateEl = element.querySelector('time, .date, .publish-date, [class*="date"]');
+          let pubDate = null;
+          if (dateEl) {
+            const datetime = dateEl.getAttribute('datetime') || dateEl.textContent.trim();
+            try {
+              pubDate = new Date(datetime).toISOString();
+            } catch {
+              pubDate = null;
+            }
+          }
+          
           if (title && link) {
             const id = link.split('/').pop() || `dig-${Date.now()}-${index}`;
             articles.push({
@@ -170,7 +190,7 @@ async function fetchDigsData() {
               description,
               imageUrl,
               author,
-              pubDate: new Date().toISOString()
+              pubDate
             });
           }
         } catch (err) {
