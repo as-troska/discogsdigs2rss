@@ -135,18 +135,24 @@ async function fetchDigsData() {
       const articles = [];
       const skipped = [];
       
-      // Try multiple selectors
+      // Collect elements from multiple selectors to avoid missing items when markup varies
       const selectors = ['article', '.card', '.dig', '.post'];
-      let elements = [];
-      let usedSelector = '';
+      const elements = [];
+      const seenElements = new Set();
+      const usedSelectors = new Set();
       
-      for (const selector of selectors) {
-        elements = Array.from(document.querySelectorAll(selector));
-        if (elements.length > 0) {
-          usedSelector = selector;
-          break;
+      selectors.forEach(selector => {
+        const found = Array.from(document.querySelectorAll(selector));
+        if (found.length > 0) {
+          usedSelectors.add(selector);
         }
-      }
+        found.forEach(el => {
+          if (!seenElements.has(el)) {
+            seenElements.add(el);
+            elements.push(el);
+          }
+        });
+      });
       
       elements.forEach((element, index) => {
         try {
@@ -208,18 +214,35 @@ async function fetchDigsData() {
         }
       });
       
+      // Deduplicate by link on the client side to avoid losing articles when Discogs repeats cards
+      const uniqueArticles = [];
+      const seenLinks = new Set();
+      const duplicateLinks = [];
+      articles.forEach(a => {
+        if (!seenLinks.has(a.link)) {
+          seenLinks.add(a.link);
+          uniqueArticles.push(a);
+        } else {
+          duplicateLinks.push(a);
+        }
+      });
+      
       return {
-        articles,
+        articles: uniqueArticles,
         skipped,
+        duplicateLinks,
         totalElements: elements.length,
-        usedSelector
+        usedSelectors: Array.from(usedSelectors)
       };
     });
     
     const digs = result.articles;
     
-    console.log(`Found ${result.totalElements} elements using selector "${result.usedSelector}"`);
-    console.log(`Extracted ${digs.length} articles, skipped ${result.skipped.length}`);
+    console.log(`Found ${result.totalElements} elements using selectors ${JSON.stringify(result.usedSelectors)}`);
+    console.log(`Extracted ${digs.length} unique articles, skipped ${result.skipped.length}`);
+    if (result.duplicateLinks && result.duplicateLinks.length > 0) {
+      console.log(`Client-side deduped ${result.duplicateLinks.length} repeated links in page markup`);
+    }
     
     if (result.skipped.length > 0) {
       console.log('Skipped elements:');
@@ -236,17 +259,7 @@ async function fetchDigsData() {
     
     // Store in database
     const beforeCount = getAllDigs().length;
-    const insertedLinks = new Set();
-    const duplicateLinks = [];
-    
-    for (const dig of digs) {
-      if (insertedLinks.has(dig.link)) {
-        duplicateLinks.push({ title: dig.title, link: dig.link });
-        console.log(`⚠️ DUPLICATE LINK IN SAME BATCH: "${dig.title}" - ${dig.link}`);
-      } else {
-        insertedLinks.add(dig.link);
-      }
-      
+    digs.forEach(dig => {
       insertDig(
         dig.link,
         dig.title,
@@ -255,17 +268,9 @@ async function fetchDigsData() {
         dig.imageUrl,
         dig.author
       );
-    }
+    });
     const afterCount = getAllDigs().length;
     const newArticles = afterCount - beforeCount;
-    
-    if (duplicateLinks.length > 0) {
-      console.log(`\n🔍 FOUND ${duplicateLinks.length} DUPLICATE LINKS IN THE SCRAPED DATA:`);
-      duplicateLinks.forEach((dup, i) => {
-        console.log(`  ${i + 1}. "${dup.title}"`);
-        console.log(`     ${dup.link}`);
-      });
-    }
     
     console.log(`Successfully fetched ${digs.length} digs from Discogs (${newArticles} new, ${digs.length - newArticles} duplicates)`);
     return digs.length;
