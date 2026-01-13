@@ -170,6 +170,20 @@ async function fetchDigsData() {
         }
       };
 
+      const getDescription = (container, title) => {
+        if (!container) return '';
+        const descEl = container.querySelector('p, .description, .excerpt, [class*="description"], [class*="excerpt"], .c-card__copy');
+        if (descEl && descEl.textContent) {
+          const txt = descEl.textContent.trim();
+          if (txt.length > 0) return txt;
+        }
+        const text = (container.textContent || '').trim();
+        if (!text) return '';
+        const cleaned = text.replace(title || '', '').trim().replace(/\s+/g, ' ');
+        if (cleaned.length > 0 && cleaned.length <= 400) return cleaned;
+        return '';
+      };
+
       const isArticleLink = (link) => {
         if (!link) return false;
         try {
@@ -207,8 +221,7 @@ async function fetchDigsData() {
           const imageUrl = imgEl ? (imgEl.src || imgEl.dataset.src || '') : '';
           
           // Try to find description
-          const descEl = element.querySelector('p, .description, .excerpt, [class*="description"]');
-          const description = descEl ? descEl.textContent.trim() : '';
+          const description = getDescription(element, title);
           
           // Try to find author
           const authorEl = element.querySelector('.author, .byline, [class*="author"]');
@@ -253,8 +266,7 @@ async function fetchDigsData() {
         const card = anchor.closest('article, .card, .tile, .post, li') || anchor.parentElement;
         const titleEl = card ? card.querySelector('h1, h2, h3, h4, .title, [class*="title"]') : null;
         const title = (titleEl ? titleEl.textContent : anchor.textContent || '').trim();
-        const descEl = card ? card.querySelector('p, .description, .excerpt, [class*="description"]') : null;
-        const description = descEl ? descEl.textContent.trim() : '';
+        const description = getDescription(card || anchor, title);
         const imgEl = card ? card.querySelector('img') : null;
         const imageUrl = imgEl ? (imgEl.src || imgEl.dataset.src || '') : '';
         addArticle({ title, link, description, imageUrl, author: 'Discogs', pubDate: null });
