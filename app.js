@@ -237,9 +237,19 @@ async function fetchDigsData() {
           const linkEl = element.querySelector('a');
           const link = normalizeLink(linkEl ? linkEl.href : '');
           
-          // Try to find image
+          // Try to find image - check multiple sources
+          let imageUrl = '';
           const imgEl = element.querySelector('img');
-          const imageUrl = imgEl ? (imgEl.src || imgEl.dataset.src || '') : '';
+          if (imgEl) {
+            imageUrl = imgEl.src || imgEl.dataset.src || imgEl.getAttribute('data-lazy-src') || '';
+          }
+          // If no image in element, check if anchor contains an image
+          if (!imageUrl && linkEl) {
+            const anchorImg = linkEl.querySelector('img');
+            if (anchorImg) {
+              imageUrl = anchorImg.src || anchorImg.dataset.src || anchorImg.getAttribute('data-lazy-src') || '';
+            }
+          }
           
           // Try to find description
           const description = getDescription(element, title);
@@ -288,8 +298,22 @@ async function fetchDigsData() {
         const titleEl = card ? card.querySelector('h1, h2, h3, h4, .title, [class*="title"]') : null;
         const title = (titleEl ? titleEl.textContent : anchor.textContent || '').trim();
         const description = getDescription(card || anchor, title);
-        const imgEl = card ? card.querySelector('img') : null;
-        const imageUrl = imgEl ? (imgEl.src || imgEl.dataset.src || '') : '';
+        
+        // Try multiple sources for image
+        let imageUrl = '';
+        if (card) {
+          const imgEl = card.querySelector('img');
+          if (imgEl) {
+            imageUrl = imgEl.src || imgEl.dataset.src || imgEl.getAttribute('data-lazy-src') || '';
+          }
+        }
+        if (!imageUrl && anchor) {
+          const anchorImg = anchor.querySelector('img');
+          if (anchorImg) {
+            imageUrl = anchorImg.src || anchorImg.dataset.src || anchorImg.getAttribute('data-lazy-src') || '';
+          }
+        }
+        
         addArticle({ title, link, description, imageUrl, author: 'Discogs', pubDate: null });
       });
       
