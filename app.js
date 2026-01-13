@@ -183,8 +183,8 @@ async function fetchDigsData() {
           }
           
           if (title && link) {
-            const id = link.split('/').pop() || `dig-${Date.now()}-${index}`;
-            articles.push({le,
+            articles.push({
+              title,
               link,
               description,
               imageUrl,
@@ -238,10 +238,10 @@ async function fetchDigsData() {
     const beforeCount = getAllDigs().length;
     for (const dig of digs) {
       insertDig(
-        dig.id,
-        dig.title,
         dig.link,
-        dig.titleate,
+        dig.title,
+        dig.description,
+        dig.pubDate,
         dig.imageUrl,
         dig.author
       );
@@ -379,11 +379,11 @@ app.get('/reset', async (req, res) => {
     db.run('DROP TABLE IF EXISTS digs');
     db.run(`
       CREATE TABLE digs (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        link TEXT NOT NULL UNIQUE,
         link TEXT PRIMARY KEY,
-        title TEXT NOT NULL
+        title TEXT NOT NULL,
+        description TEXT,
+        pubDate TEXT,
+        imageUrl TEXT,
         author TEXT,
         createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
       )
