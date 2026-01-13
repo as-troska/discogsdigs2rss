@@ -154,15 +154,29 @@ async function fetchDigsData() {
         });
       });
       
+      const normalizeLink = (raw) => {
+        if (!raw) return '';
+        try {
+          const url = new URL(raw, window.location.origin);
+          url.hash = '';
+          url.search = '';
+          // Keep a single trailing slash for consistency
+          url.pathname = url.pathname.replace(/\/+$/, '/') || '/';
+          return url.toString();
+        } catch {
+          return raw.trim();
+        }
+      };
+
       elements.forEach((element, index) => {
         try {
           // Try to find title
           const titleEl = element.querySelector('h1, h2, h3, h4, .title, [class*="title"]');
           const title = titleEl ? titleEl.textContent.trim() : '';
           
-          // Try to find link
+          // Try to find link (prefer the first anchor)
           const linkEl = element.querySelector('a');
-          const link = linkEl ? linkEl.href : '';
+          const link = normalizeLink(linkEl ? linkEl.href : '');
           
           // Try to find image
           const imgEl = element.querySelector('img');
