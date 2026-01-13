@@ -24,7 +24,6 @@ RUN npm ci --only=production
 # Copy app files (invalidate cache if any file changes)
 COPY app.js ./
 COPY test-data.js ./
-COPY README.md ./
 
 # Create data directory for database
 RUN mkdir -p /app/data
