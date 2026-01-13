@@ -254,6 +254,11 @@ async function fetchDigsData() {
     
     console.log(`Found ${result.totalElements} elements using selectors ${JSON.stringify(result.usedSelectors)}`);
     console.log(`Extracted ${digs.length} unique articles, skipped ${result.skipped.length}`);
+    console.log('--- Scraped articles (unique) ---');
+    digs.forEach((dig, i) => {
+      console.log(`  ${i + 1}. "${dig.title}"`);
+      console.log(`     ${dig.link}`);
+    });
     
     if (result.duplicateLinks && result.duplicateLinks.length > 0) {
       console.log(`\n🔍 Client-side deduped ${result.duplicateLinks.length} repeated links in page markup:`);
