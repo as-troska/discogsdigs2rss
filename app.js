@@ -197,6 +197,22 @@ async function fetchDigsData() {
           }
         }
         
+        // Try to find text nodes directly in container (for cards where description is loose text)
+        const textNodes = [];
+        const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+        let node;
+        while (node = walker.nextNode()) {
+          const text = node.textContent.trim();
+          if (text && text.length > 20 && text !== title && !text.startsWith('http')) {
+            textNodes.push(text);
+          }
+        }
+        if (textNodes.length > 0) {
+          // Find the longest meaningful text node
+          const longest = textNodes.sort((a, b) => b.length - a.length)[0];
+          if (longest && longest.length <= 400) return longest;
+        }
+        
         // Last resort: extract text from container, excluding title
         const text = (container.textContent || '').trim();
         if (!text) return '';
