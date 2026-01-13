@@ -101,6 +101,7 @@ async function fetchDigsData() {
     if (!browser) {
       browser = await puppeteer.launch({
         headless: 'new',
+        executablePath: process.env.CHROME_PATH || '/usr/bin/chromium-browser',
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',

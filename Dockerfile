@@ -9,6 +9,9 @@ RUN apk add --no-cache \
     ca-certificates \
     font-noto-cjk
 
+# Tell Puppeteer to skip Chromium download
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+
 # Set working directory
 WORKDIR /app
 
@@ -18,8 +21,10 @@ COPY package*.json ./
 # Install Node dependencies
 RUN npm ci --only=production
 
-# Copy app files
-COPY . .
+# Copy app files (invalidate cache if any file changes)
+COPY app.js ./
+COPY test-data.js ./
+COPY README.md ./
 
 # Create data directory for database
 RUN mkdir -p /app/data
@@ -33,3 +38,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 
 # Run app
 CMD ["node", "app.js"]
+
