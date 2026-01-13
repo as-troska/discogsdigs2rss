@@ -133,19 +133,22 @@ async function fetchDigsData() {
     await new Promise(resolve => setTimeout(resolve, 2000));
     
     // Extract articles from the page
-    const digs = await page.evaluate(() => {
+    const result = await page.evaluate(() => {
       const articles = [];
+      const skipped = [];
       
       // Try multiple selectors
       const selectors = ['article', '.card', '.dig', '.post'];
       let elements = [];
+      let usedSelector = '';
       
       for (const selector of selectors) {
         elements = Array.from(document.querySelectorAll(selector));
-        if (elements.length > 0) break;
+        if (elements.length > 0) {
+          usedSelector = selector;
+          break;
+        }
       }
-      
-      console.log(`Found ${elements.length} elements on page`);
       
       elements.forEach((element, index) => {
         try {
@@ -193,15 +196,45 @@ async function fetchDigsData() {
               pubDate
             });
           } else {
-            console.log(`Skipping element ${index}: title="${title}", link="${link}"`);
+            skipped.push({
+              index,
+              title: title || '(no title)',
+              link: link || '(no link)',
+              hasTitle: !!title,
+              hasLink: !!link
+            });
           }
         } catch (err) {
-          console.error('Error parsing article:', err);
+          skipped.push({
+            index,
+            error: err.message
+          });
         }
       });
       
-      return articles;
+      return {
+        articles,
+        skipped,
+        totalElements: elements.length,
+        usedSelector
+      };
     });
+    
+    const digs = result.articles;
+    
+    console.log(`Found ${result.totalElements} elements using selector "${result.usedSelector}"`);
+    console.log(`Extracted ${digs.length} articles, skipped ${result.skipped.length}`);
+    
+    if (result.skipped.length > 0) {
+      console.log('Skipped elements:');
+      result.skipped.forEach(skip => {
+        if (skip.error) {
+          console.log(`  [${skip.index}] Error: ${skip.error}`);
+        } else {
+          console.log(`  [${skip.index}] title=${skip.hasTitle ? '✓' : '✗'}, link=${skip.hasLink ? '✓' : '✗'} - "${skip.title}"`);
+        }
+      });
+    }
     
     await page.close();
     
