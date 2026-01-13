@@ -28,9 +28,8 @@ async function initDatabase() {
   // Create table for storing digs (articles about music)
   db.run(`
     CREATE TABLE IF NOT EXISTS digs (
-      id TEXT PRIMARY KEY,
+      link TEXT PRIMARY KEY,
       title TEXT NOT NULL,
-      link TEXT NOT NULL UNIQUE,
       description TEXT,
       pubDate TEXT,
       imageUrl TEXT,
@@ -50,12 +49,12 @@ function saveDatabase() {
 }
 
 // Helper functions for database operations
-function insertDig(id, title, link, description, pubDate, imageUrl, author) {
+function insertDig(link, title, description, pubDate, imageUrl, author) {
   try {
     db.run(
-      `INSERT OR IGNORE INTO digs (id, title, link, description, pubDate, imageUrl, author) 
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [id, title, link, description, pubDate || new Date().toISOString(), imageUrl, author]
+      `INSERT OR IGNORE INTO digs (link, title, description, pubDate, imageUrl, author) 
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [link, title, description, pubDate || new Date().toISOString(), imageUrl, author]
     );
     saveDatabase();
   } catch (error) {
@@ -82,9 +81,8 @@ async function fetchDigsData() {
       console.log('Using test data...');
       for (const dig of testData) {
         insertDig(
-          dig.id,
-          dig.title,
           dig.link,
+          dig.title,
           dig.description,
           dig.pubDate,
           dig.imageUrl,
@@ -186,9 +184,7 @@ async function fetchDigsData() {
           
           if (title && link) {
             const id = link.split('/').pop() || `dig-${Date.now()}-${index}`;
-            articles.push({
-              id,
-              title,
+            articles.push({le,
               link,
               description,
               imageUrl,
@@ -245,8 +241,7 @@ async function fetchDigsData() {
         dig.id,
         dig.title,
         dig.link,
-        dig.description,
-        dig.pubDate,
+        dig.titleate,
         dig.imageUrl,
         dig.author
       );
@@ -387,9 +382,8 @@ app.get('/reset', async (req, res) => {
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
         link TEXT NOT NULL UNIQUE,
-        description TEXT,
-        pubDate TEXT,
-        imageUrl TEXT,
+        link TEXT PRIMARY KEY,
+        title TEXT NOT NULL
         author TEXT,
         createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
       )
