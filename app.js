@@ -172,15 +172,36 @@ async function fetchDigsData() {
 
       const getDescription = (container, title) => {
         if (!container) return '';
-        const descEl = container.querySelector('p, .description, .excerpt, [class*="description"], [class*="excerpt"], .c-card__copy');
-        if (descEl && descEl.textContent) {
-          const txt = descEl.textContent.trim();
-          if (txt.length > 0) return txt;
+        
+        // Try multiple selectors for description text
+        const selectors = [
+          'p:not([class*="button"]):not([class*="link"])',
+          '.description',
+          '.excerpt', 
+          '[class*="description"]',
+          '[class*="excerpt"]',
+          '.c-card__copy',
+          '.c-card__text',
+          '[class*="summary"]',
+          '[class*="intro"]'
+        ];
+        
+        for (const sel of selectors) {
+          const descEl = container.querySelector(sel);
+          if (descEl && descEl.textContent) {
+            const txt = descEl.textContent.trim();
+            // Make sure it's not just the title and has reasonable length
+            if (txt.length > 20 && txt !== title && !txt.startsWith('http')) {
+              return txt;
+            }
+          }
         }
+        
+        // Last resort: extract text from container, excluding title
         const text = (container.textContent || '').trim();
         if (!text) return '';
         const cleaned = text.replace(title || '', '').trim().replace(/\s+/g, ' ');
-        if (cleaned.length > 0 && cleaned.length <= 400) return cleaned;
+        if (cleaned.length > 30 && cleaned.length <= 400) return cleaned;
         return '';
       };
 
