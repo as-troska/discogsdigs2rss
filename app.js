@@ -51,18 +51,15 @@ function saveDatabase() {
 
 // Helper functions for database operations
 function insertDig(id, title, link, description, pubDate, imageUrl, author) {
-  // Check if this link already exists
-  const stmt = db.prepare('SELECT id FROM digs WHERE link = ?');
-  const exists = stmt.step();
-  stmt.free();
-  
-  if (!exists) {
-    // Only insert if it's new
+  try {
     db.run(
-      'INSERT INTO digs (id, title, link, description, pubDate, imageUrl, author) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      `INSERT OR IGNORE INTO digs (id, title, link, description, pubDate, imageUrl, author) 
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [id, title, link, description, pubDate || new Date().toISOString(), imageUrl, author]
     );
     saveDatabase();
+  } catch (error) {
+    console.log('Skipping duplicate article:', link);
   }
 }
 
@@ -270,7 +267,8 @@ app.get('/rss', async (req, res) => {
     // Generate RSS feed
     const rss = generateRSS(digs);
     
-    res.type('application/rss+xml');
+    res.type('application/rss+xml; charset=utf-8');
+    res.set('Content-Disposition', 'inline');
     res.send(rss);
   } catch (error) {
     console.error('Error in /rss route:', error.message);
@@ -283,10 +281,12 @@ app.get('/', (req, res) => {
   const lastUpdate = digs.length > 0 ? new Date(digs[0].createdAt).toLocaleString() : 'Never';
   res.send(`
     <h1>Discogs Digs RSS Feed</h1>
-    <p>RSS feed available at: <a href="/rss">/rss</a></p>
-    <p>Articles in database: ${digs.length}</p>
-    <p>Last update: ${lastUpdate}</p>
-    <p><a href="/update">Force update now</a> (use sparingly)</p>
+    <p>📡 RSS feed available at: <a href="/rss">/rss</a></p>
+    <p>📰 Articles in database: <strong>${digs.length}</strong></p>
+    <p>🕐 Last update: ${lastUpdate}</p>
+    <p>⏰ Auto-updates every 2 hours</p>
+    <hr>
+    <p><a href="/admin">⚙️ Admin Panel</a> - View status, force update, reset database</p>
   `);
 });
 
@@ -297,6 +297,72 @@ app.get('/update', async (req, res) => {
     res.send(`Updated! Fetched ${count} articles. <a href="/">Back</a>`);
   } catch (error) {
     res.status(500).send(`Error: ${error.message}. <a href="/">Back</a>`);
+  }
+});
+
+app.get('/admin', (req, res) => {
+  const digs = getAllDigs();
+  const lastUpdate = digs.length > 0 ? new Date(digs[0].createdAt).toLocaleString() : 'Never';
+  
+  res.send(`
+    <h1>Discogs Digs RSS - Admin Panel</h1>
+    <h2>Database Status</h2>
+    <p><strong>Articles in database:</strong> ${digs.length}</p>
+    <p><strong>Last update:</strong> ${lastUpdate}</p>
+    <p><strong>Database file:</strong> ${DB_PATH}</p>
+    <p><strong>Update interval:</strong> Every 2 hours (automatic)</p>
+    
+    <h2>Actions</h2>
+    <ul>
+      <li><a href="/update">🔄 Force Update Now</a> (fetch latest articles)</li>
+      <li><a href="/reset" onclick="return confirm('Are you SURE? This will DELETE all ${digs.length} articles and reset the database!');">🗑️ Reset Database</a> (WARNING: This deletes everything!)</li>
+    </ul>
+    
+    <h2>Links</h2>
+    <ul>
+      <li><a href="/">📰 Home</a></li>
+      <li><a href="/rss">📡 RSS Feed</a></li>
+    </ul>
+  `);
+});
+
+app.get('/reset', async (req, res) => {
+  try {
+    const confirmation = req.query.confirm === 'true';
+    
+    if (!confirmation) {
+      return res.send(`
+        <h1>Reset Database - Confirmation Required</h1>
+        <p style="color: red; font-weight: bold;">WARNING: This will delete ALL ${getAllDigs().length} articles!</p>
+        <p><a href="/reset?confirm=true" onclick="return confirm('This action cannot be undone. Continue?');" style="padding: 10px; background: red; color: white; text-decoration: none; border-radius: 5px;">✓ Yes, Reset Everything</a></p>
+        <p><a href="/admin">✗ Cancel</a></p>
+      `);
+    }
+    
+    // Drop the table and recreate it
+    db.run('DROP TABLE IF EXISTS digs');
+    db.run(`
+      CREATE TABLE digs (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        link TEXT NOT NULL UNIQUE,
+        description TEXT,
+        pubDate TEXT,
+        imageUrl TEXT,
+        author TEXT,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    saveDatabase();
+    
+    console.log('Database reset at', new Date().toLocaleString());
+    res.send(`
+      <h1>✓ Database Reset Successfully</h1>
+      <p>All articles have been deleted. The database is now empty.</p>
+      <p><a href="/update">Start fetching new articles</a> or <a href="/admin">Back to admin</a></p>
+    `);
+  } catch (error) {
+    res.status(500).send(`Error resetting database: ${error.message}. <a href="/admin">Back</a>`);
   }
 });
 
