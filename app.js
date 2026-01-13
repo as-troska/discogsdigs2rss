@@ -254,10 +254,15 @@ async function fetchDigsData() {
     
     console.log(`Found ${result.totalElements} elements using selectors ${JSON.stringify(result.usedSelectors)}`);
     console.log(`Extracted ${digs.length} unique articles, skipped ${result.skipped.length}`);
-    if (result.duplicateLinks && result.duplicateLinks.length > 0) {
-      console.log(`Client-side deduped ${result.duplicateLinks.length} repeated links in page markup`);
-    }
     
+    if (result.duplicateLinks && result.duplicateLinks.length > 0) {
+      console.log(`\n🔍 Client-side deduped ${result.duplicateLinks.length} repeated links in page markup:`);
+      result.duplicateLinks.forEach((dup, i) => {
+        console.log(`  ${i + 1}. "${dup.title}"`);
+        console.log(`     ${dup.link}`);
+      });
+    }
+
     if (result.skipped.length > 0) {
       console.log('Skipped elements:');
       result.skipped.forEach(skip => {
