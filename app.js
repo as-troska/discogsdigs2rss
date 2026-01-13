@@ -168,7 +168,7 @@ async function fetchDigsData() {
       const skipped = [];
       
       // Collect elements from multiple selectors to avoid missing items when markup varies
-      const selectors = ['article', '.card', '.dig', '.post'];
+      const selectors = ['article', '.card', '.dig', '.post', '.ultp-block-content-wrap'];
       const elements = [];
       const seenElements = new Set();
       const usedSelectors = new Set();
@@ -208,6 +208,7 @@ async function fetchDigsData() {
         // Try multiple selectors for description text
         const selectors = [
           'p:not([class*="button"]):not([class*="link"])',
+          '.ultp-block-excerpt',
           '.description',
           '.excerpt', 
           '[class*="description"]',
