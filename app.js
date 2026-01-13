@@ -145,6 +145,8 @@ async function fetchDigsData() {
         if (elements.length > 0) break;
       }
       
+      console.log(`Found ${elements.length} elements on page`);
+      
       elements.forEach((element, index) => {
         try {
           // Try to find title
@@ -190,6 +192,8 @@ async function fetchDigsData() {
               author,
               pubDate
             });
+          } else {
+            console.log(`Skipping element ${index}: title="${title}", link="${link}"`);
           }
         } catch (err) {
           console.error('Error parsing article:', err);
@@ -202,6 +206,7 @@ async function fetchDigsData() {
     await page.close();
     
     // Store in database
+    const beforeCount = getAllDigs().length;
     for (const dig of digs) {
       insertDig(
         dig.id,
@@ -213,8 +218,10 @@ async function fetchDigsData() {
         dig.author
       );
     }
+    const afterCount = getAllDigs().length;
+    const newArticles = afterCount - beforeCount;
     
-    console.log(`Successfully fetched ${digs.length} digs from Discogs`);
+    console.log(`Successfully fetched ${digs.length} digs from Discogs (${newArticles} new, ${digs.length - newArticles} duplicates)`);
     return digs.length;
   } catch (error) {
     console.error('Error fetching digs:', error.message);
