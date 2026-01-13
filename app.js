@@ -160,6 +160,8 @@ async function fetchDigsData() {
           const url = new URL(raw, window.location.origin);
           url.hash = '';
           url.search = '';
+          // Fix accidental inlined source URL segments like /https-www.discogs.com-
+          url.pathname = url.pathname.replace(/\/https?-www\.discogs\.com-/, '/');
           // Keep a single trailing slash for consistency
           url.pathname = url.pathname.replace(/\/+$/, '/') || '/';
           return url.toString();
@@ -168,8 +170,25 @@ async function fetchDigsData() {
         }
       };
 
+      const isArticleLink = (link) => {
+        if (!link) return false;
+        try {
+          const url = new URL(link, window.location.origin);
+          const parts = url.pathname.split('/').filter(Boolean); // e.g., ['digs','features','slug']
+          if (parts.length < 3) return false; // need /digs/<section>/<slug>
+          if (parts[0] !== 'digs') return false;
+          const section = parts[1];
+          if (!['features', 'music', 'collecting', 'gear'].includes(section)) return false;
+          const slug = parts[2];
+          return !!slug && slug.length > 2;
+        } catch {
+          return false;
+        }
+      };
+
       const addArticle = ({ title, link, description, imageUrl, author, pubDate }) => {
         if (!title || !link) return;
+        if (!isArticleLink(link)) return;
         articles.push({ title, link, description, imageUrl, author, pubDate });
       };
 
@@ -230,7 +249,7 @@ async function fetchDigsData() {
       const cardAnchors = Array.from(document.querySelectorAll('a[href*="/digs/"]'));
       cardAnchors.forEach((anchor, idx) => {
         const link = normalizeLink(anchor.href);
-        if (!link || !link.includes('/digs/')) return;
+        if (!isArticleLink(link)) return;
         const card = anchor.closest('article, .card, .tile, .post, li') || anchor.parentElement;
         const titleEl = card ? card.querySelector('h1, h2, h3, h4, .title, [class*="title"]') : null;
         const title = (titleEl ? titleEl.textContent : anchor.textContent || '').trim();
