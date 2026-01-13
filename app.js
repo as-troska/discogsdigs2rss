@@ -51,14 +51,46 @@ function saveDatabase() {
 // Helper functions for database operations
 function insertDig(link, title, description, pubDate, imageUrl, author) {
   try {
-    db.run(
-      `INSERT OR IGNORE INTO digs (link, title, description, pubDate, imageUrl, author) 
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [link, title, description, pubDate || new Date().toISOString(), imageUrl, author]
-    );
+    // First, check if article already exists
+    const stmt = db.prepare('SELECT * FROM digs WHERE link = ?');
+    stmt.bind([link]);
+    const exists = stmt.step();
+    stmt.free();
+    
+    if (exists) {
+      // Article exists - merge data with preference for better content
+      stmt = db.prepare('SELECT description, imageUrl, pubDate FROM digs WHERE link = ?');
+      stmt.bind([link]);
+      stmt.step();
+      const existing = stmt.getAsObject();
+      stmt.free();
+      
+      // Prefer longer description
+      const finalDescription = (!existing.description && description) || 
+                               (description && description.length > (existing.description || '').length) ?
+                               description : existing.description;
+      
+      // Prefer existing image (first one found), but take new if we didn't have one
+      const finalImageUrl = existing.imageUrl || imageUrl;
+      
+      // Prefer existing pubDate (first one found)
+      const finalPubDate = existing.pubDate || pubDate;
+      
+      db.run(
+        'UPDATE digs SET description = ?, imageUrl = ?, pubDate = ? WHERE link = ?',
+        [finalDescription, finalImageUrl, finalPubDate, link]
+      );
+    } else {
+      // New article - insert it
+      db.run(
+        `INSERT INTO digs (link, title, description, pubDate, imageUrl, author) 
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [link, title, description, pubDate || new Date().toISOString(), imageUrl, author]
+      );
+    }
     saveDatabase();
   } catch (error) {
-    console.log('Skipping duplicate article:', link);
+    console.log('Error with article:', link, error.message);
   }
 }
 
