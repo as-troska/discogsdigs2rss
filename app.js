@@ -396,7 +396,17 @@ async function fetchDigsData() {
 
 // Generate RSS feed
 function generateRSS(digs) {
-  const items = digs.map(dig => `
+  const items = digs.map(dig => {
+    // Build content with image and description
+    let content = '';
+    if (dig.imageUrl) {
+      content += `<img src="${dig.imageUrl}" alt="${dig.title}" style="max-width: 100%; height: auto;"/><br/><br/>`;
+    }
+    if (dig.description) {
+      content += dig.description;
+    }
+    
+    return `
     <item>
       <title><![CDATA[${dig.title}]]></title>
       <link>${dig.link}</link>
@@ -404,12 +414,16 @@ function generateRSS(digs) {
       <pubDate>${new Date(dig.pubDate).toUTCString()}</pubDate>
       ${dig.author ? `<author>${dig.author}</author>` : ''}
       ${dig.description ? `<description><![CDATA[${dig.description}]]></description>` : ''}
+      ${content ? `<content:encoded><![CDATA[${content}]]></content:encoded>` : ''}
       ${dig.imageUrl ? `<enclosure url="${dig.imageUrl}" type="image/jpeg"/>` : ''}
     </item>
-  `).join('');
+  `;
+  }).join('');
   
   return `<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+<rss version="2.0" 
+     xmlns:atom="http://www.w3.org/2005/Atom"
+     xmlns:content="http://purl.org/rss/1.0/modules/content/">
   <channel>
     <title>Discogs Digs RSS Feed</title>
     <link>https://www.discogs.com/digs</link>
