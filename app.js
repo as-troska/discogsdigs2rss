@@ -236,7 +236,17 @@ async function fetchDigsData() {
     
     // Store in database
     const beforeCount = getAllDigs().length;
+    const insertedLinks = new Set();
+    const duplicateLinks = [];
+    
     for (const dig of digs) {
+      if (insertedLinks.has(dig.link)) {
+        duplicateLinks.push({ title: dig.title, link: dig.link });
+        console.log(`⚠️ DUPLICATE LINK IN SAME BATCH: "${dig.title}" - ${dig.link}`);
+      } else {
+        insertedLinks.add(dig.link);
+      }
+      
       insertDig(
         dig.link,
         dig.title,
@@ -248,6 +258,14 @@ async function fetchDigsData() {
     }
     const afterCount = getAllDigs().length;
     const newArticles = afterCount - beforeCount;
+    
+    if (duplicateLinks.length > 0) {
+      console.log(`\n🔍 FOUND ${duplicateLinks.length} DUPLICATE LINKS IN THE SCRAPED DATA:`);
+      duplicateLinks.forEach((dup, i) => {
+        console.log(`  ${i + 1}. "${dup.title}"`);
+        console.log(`     ${dup.link}`);
+      });
+    }
     
     console.log(`Successfully fetched ${digs.length} digs from Discogs (${newArticles} new, ${digs.length - newArticles} duplicates)`);
     return digs.length;
