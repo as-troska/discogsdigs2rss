@@ -168,6 +168,11 @@ async function fetchDigsData() {
         }
       };
 
+      const addArticle = ({ title, link, description, imageUrl, author, pubDate }) => {
+        if (!title || !link) return;
+        articles.push({ title, link, description, imageUrl, author, pubDate });
+      };
+
       elements.forEach((element, index) => {
         try {
           // Try to find title
@@ -203,14 +208,7 @@ async function fetchDigsData() {
           }
           
           if (title && link) {
-            articles.push({
-              title,
-              link,
-              description,
-              imageUrl,
-              author,
-              pubDate
-            });
+            addArticle({ title, link, description, imageUrl, author, pubDate });
           } else {
             skipped.push({
               index,
@@ -226,6 +224,21 @@ async function fetchDigsData() {
             error: err.message
           });
         }
+      });
+
+      // Fallback: capture cards/tiles with links to /digs/ even if not wrapped in expected selectors
+      const cardAnchors = Array.from(document.querySelectorAll('a[href*="/digs/"]'));
+      cardAnchors.forEach((anchor, idx) => {
+        const link = normalizeLink(anchor.href);
+        if (!link || !link.includes('/digs/')) return;
+        const card = anchor.closest('article, .card, .tile, .post, li') || anchor.parentElement;
+        const titleEl = card ? card.querySelector('h1, h2, h3, h4, .title, [class*="title"]') : null;
+        const title = (titleEl ? titleEl.textContent : anchor.textContent || '').trim();
+        const descEl = card ? card.querySelector('p, .description, .excerpt, [class*="description"]') : null;
+        const description = descEl ? descEl.textContent.trim() : '';
+        const imgEl = card ? card.querySelector('img') : null;
+        const imageUrl = imgEl ? (imgEl.src || imgEl.dataset.src || '') : '';
+        addArticle({ title, link, description, imageUrl, author: 'Discogs', pubDate: null });
       });
       
       // Deduplicate by link on the client side to avoid losing articles when Discogs repeats cards
