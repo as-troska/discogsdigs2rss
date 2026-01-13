@@ -317,18 +317,38 @@ async function fetchDigsData() {
         addArticle({ title, link, description, imageUrl, author: 'Discogs', pubDate: null });
       });
       
-      // Deduplicate by link on the client side to avoid losing articles when Discogs repeats cards
-      const uniqueArticles = [];
-      const seenLinks = new Set();
+      // Deduplicate by link on the client side, but merge data from duplicates
+      const articlesByLink = new Map();
       const duplicateLinks = [];
+      
       articles.forEach(a => {
-        if (!seenLinks.has(a.link)) {
-          seenLinks.add(a.link);
-          uniqueArticles.push(a);
+        if (!articlesByLink.has(a.link)) {
+          articlesByLink.set(a.link, a);
         } else {
           duplicateLinks.push(a);
+          // Merge: keep the best version of each field
+          const existing = articlesByLink.get(a.link);
+          
+          // Prefer longer/existing description
+          if (!existing.description && a.description) {
+            existing.description = a.description;
+          } else if (a.description && a.description.length > (existing.description || '').length) {
+            existing.description = a.description;
+          }
+          
+          // Prefer existing image URL
+          if (!existing.imageUrl && a.imageUrl) {
+            existing.imageUrl = a.imageUrl;
+          }
+          
+          // Prefer existing pubDate
+          if (!existing.pubDate && a.pubDate) {
+            existing.pubDate = a.pubDate;
+          }
         }
       });
+      
+      const uniqueArticles = Array.from(articlesByLink.values());
       
       return {
         articles: uniqueArticles,
