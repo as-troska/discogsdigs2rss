@@ -276,9 +276,21 @@ async function fetchDigsData() {
     
     await page.close();
     
-    // Store in database
-    const beforeCount = getAllDigs().length;
+    // Store in database with detailed duplicate reporting (already-present in DB)
+    const existing = getAllDigs();
+    const beforeCount = existing.length;
+    const existingLinks = new Set(existing.map(d => d.link));
+    const existingTitleByLink = new Map(existing.map(d => [d.link, d.title]));
+    const duplicatesInDb = [];
+    
     digs.forEach(dig => {
+      if (existingLinks.has(dig.link)) {
+        duplicatesInDb.push({
+          link: dig.link,
+          scrapedTitle: dig.title,
+          existingTitle: existingTitleByLink.get(dig.link) || '(unknown title)'
+        });
+      }
       insertDig(
         dig.link,
         dig.title,
@@ -290,6 +302,15 @@ async function fetchDigsData() {
     });
     const afterCount = getAllDigs().length;
     const newArticles = afterCount - beforeCount;
+    
+    if (duplicatesInDb.length > 0) {
+      console.log(`\n⚠️ Already in database (skipped on insert): ${duplicatesInDb.length}`);
+      duplicatesInDb.forEach((dup, i) => {
+        console.log(`  ${i + 1}. scraped="${dup.scrapedTitle}"`);
+        console.log(`     link=${dup.link}`);
+        console.log(`     existing title in DB="${dup.existingTitle}"`);
+      });
+    }
     
     console.log(`Successfully fetched ${digs.length} digs from Discogs (${newArticles} new, ${digs.length - newArticles} duplicates)`);
     return digs.length;
