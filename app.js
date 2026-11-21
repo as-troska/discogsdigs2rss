@@ -1,5 +1,5 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
+const cheerio = require('cheerio');
 const initSqlJs = require('sql.js');
 const fs = require('fs');
 const path = require('path');
@@ -11,7 +11,6 @@ const DB_PATH = path.join(__dirname, process.env.DATA_DIR || '.', 'digs.db');
 const USE_TEST_DATA = process.env.USE_TEST_DATA === 'true';
 
 let db;
-let browser;
 
 // Initialize SQLite database
 async function initDatabase() {
@@ -34,9 +33,14 @@ async function initDatabase() {
       pubDate TEXT,
       imageUrl TEXT,
       author TEXT,
+      content TEXT,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Migrate older databases that lack the content column
+  const cols = db.exec('PRAGMA table_info(digs)')[0].values.map(r => r[1]);
+  if (!cols.includes('content')) db.run('ALTER TABLE digs ADD COLUMN content TEXT');
   
   saveDatabase();
 }
@@ -48,47 +52,22 @@ function saveDatabase() {
   fs.writeFileSync(DB_PATH, buffer);
 }
 
-// Helper functions for database operations
-function insertDig(link, title, description, pubDate, imageUrl, author) {
+// Insert or update an article. Data from the WordPress API is authoritative,
+// so existing rows get their fields refreshed (fixes old rows with bad dates).
+function upsertDig({ link, title, description, pubDate, imageUrl, author, content }) {
   try {
-    // First, check if article already exists
-    const stmt = db.prepare('SELECT * FROM digs WHERE link = ?');
-    stmt.bind([link]);
-    const exists = stmt.step();
-    stmt.free();
-    
-    if (exists) {
-      // Article exists - merge data with preference for better content
-      stmt = db.prepare('SELECT description, imageUrl, pubDate FROM digs WHERE link = ?');
-      stmt.bind([link]);
-      stmt.step();
-      const existing = stmt.getAsObject();
-      stmt.free();
-      
-      // Prefer longer description
-      const finalDescription = (!existing.description && description) || 
-                               (description && description.length > (existing.description || '').length) ?
-                               description : existing.description;
-      
-      // Prefer existing image (first one found), but take new if we didn't have one
-      const finalImageUrl = existing.imageUrl || imageUrl;
-      
-      // Prefer existing pubDate (first one found)
-      const finalPubDate = existing.pubDate || pubDate;
-      
-      db.run(
-        'UPDATE digs SET description = ?, imageUrl = ?, pubDate = ? WHERE link = ?',
-        [finalDescription, finalImageUrl, finalPubDate, link]
-      );
-    } else {
-      // New article - insert it
-      db.run(
-        `INSERT INTO digs (link, title, description, pubDate, imageUrl, author) 
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [link, title, description, pubDate || new Date().toISOString(), imageUrl, author]
-      );
-    }
-    saveDatabase();
+    db.run(
+      `INSERT INTO digs (link, title, description, pubDate, imageUrl, author, content)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(link) DO UPDATE SET
+         title = excluded.title,
+         description = COALESCE(NULLIF(excluded.description, ''), digs.description),
+         pubDate = COALESCE(excluded.pubDate, digs.pubDate),
+         imageUrl = COALESCE(NULLIF(excluded.imageUrl, ''), digs.imageUrl),
+         author = COALESCE(NULLIF(excluded.author, ''), digs.author),
+         content = COALESCE(NULLIF(excluded.content, ''), digs.content)`,
+      [link, title, description || '', pubDate || new Date().toISOString(), imageUrl || '', author || 'Discogs', content || '']
+    );
   } catch (error) {
     console.log('Error with article:', link, error.message);
   }
@@ -104,411 +83,205 @@ function getAllDigs() {
   return digs;
 }
 
-// Fetch and parse Discogs Digs page with Puppeteer
+// Discogs Digs is WordPress. The REST API on content.discogs.com is not behind
+// the Cloudflare challenge that blocks scraping www.discogs.com/digs.
+const WP_API = process.env.WP_API || 'https://content.discogs.com/digs/wp-json/wp/v2';
+const FETCH_PAGES = parseInt(process.env.FETCH_PAGES || '2', 10); // 50 posts per page
+const USER_AGENT = 'Mozilla/5.0 (compatible; discogsdigs2rss/1.0)';
+
+async function getJson(url) {
+  const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' } });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  return res.json();
+}
+
+// Strip tags and decode HTML entities
+function htmlToText(html) {
+  if (!html) return '';
+  return cheerio.load(`<div>${html}</div>`)('div').first().text().replace(/\s+/g, ' ').trim();
+}
+
+function extractByline(contentHtml) {
+  if (!contentHtml) return '';
+  const $ = cheerio.load(contentHtml);
+  const credit = $('p.author-credit, p.author-credit-2026').first().text().trim();
+  return credit.replace(/^by\s+/i, '').trim();
+}
+
+// Turn the WordPress article HTML into something RSS readers render well:
+// drop header bits already in the item (title, excerpt, byline), UI widgets,
+// related-posts grids and inline SVG, and strip classes/inline styles.
+function cleanContent(contentHtml) {
+  if (!contentHtml) return '';
+  const $ = cheerio.load(contentHtml, null, false);
+
+  // Album blocks: rebuild as a compact "cover + Title – Artist (year, format)" paragraph
+  $('.release-item').each((_, el) => {
+    const r = $(el);
+    const img = r.find('.release-block-image img').attr('src');
+    const titleLink = r.find('a.release-link');
+    const title = r.find('.release-block-title').text().trim();
+    const artistEl = r.find('.release-block-artist');
+    const artist = artistEl.text().trim();
+    const artistHref = artistEl.closest('a').attr('href');
+    const meta = [r.find('.release-block-year').text().trim(), r.find('.release-block-format').text().trim()]
+      .filter(Boolean).join(' · ');
+    let html = '<p>';
+    if (img) html += `<img src="${escapeXml(img)}" alt="" width="300"><br>`;
+    if (title) html += titleLink.attr('href') ? `<a href="${escapeXml(titleLink.attr('href'))}"><strong>${escapeXml(title)}</strong></a>` : `<strong>${escapeXml(title)}</strong>`;
+    if (artist) html += ' – ' + (artistHref ? `<a href="${escapeXml(artistHref)}">${escapeXml(artist)}</a>` : escapeXml(artist));
+    if (meta) html += `<br><small>${escapeXml(meta)}</small>`;
+    html += '</p>';
+    r.closest('section.wp-block-single-release').length
+      ? r.closest('section.wp-block-single-release').replaceWith(html)
+      : r.replaceWith(html);
+  });
+
+  $([
+    'script', 'style', 'noscript', 'svg', 'button', 'form', 'template',
+    'h1.wp-block-post-title', '.wp-block-post-excerpt', '.taxonomy-category',
+    'p.author-credit', 'p.author-credit-2026', '.wp-block-spacer',
+    '.wantlist-icon', '.release-block-cta', '.release-block-genre',
+    '.ultp-post-grid-block', '.wp-block-ultimate-post-heading', '.keep-digging',
+    '.keep-digging-footer', '.email-signup', '.swiper-pagination',
+    '.wp-block-post-featured-image'
+  ].join(',')).remove();
+
+  // Lazy-loaded images: make sure src is set, use absolute URLs
+  $('img').each((_, el) => {
+    const img = $(el);
+    const src = img.attr('src') || img.attr('data-src') || img.attr('data-lazy-src');
+    if (!src) { img.remove(); return; }
+    img.attr('src', src);
+  });
+
+  // Embedded players rarely work in readers; replace with a plain link
+  $('iframe').each((_, el) => {
+    const src = $(el).attr('src');
+    if (src) $(el).replaceWith(`<p><a href="${escapeXml(src)}">▶ Open embedded media</a></p>`);
+    else $(el).remove();
+  });
+
+  const keepAttrs = { a: ['href'], img: ['src', 'alt', 'width', 'height'] };
+  $('*').each((_, el) => {
+    const allowed = keepAttrs[el.tagName] || [];
+    for (const name of Object.keys(el.attribs || {})) {
+      if (!allowed.includes(name)) $(el).removeAttr(name);
+    }
+  });
+
+  // Unwrap layout-only containers and drop empty ones
+  $('div, section, figure:not(:has(img))').each((_, el) => {
+    if (!$(el).text().trim() && !$(el).find('img').length) $(el).remove();
+  });
+  $('div, section').each((_, el) => { $(el).replaceWith($(el).contents()); });
+
+  return $.html().replace(/<!--[\s\S]*?-->/g, '').replace(/\n\s*\n+/g, '\n').trim();
+}
+
+function firstImage(contentHtml) {
+  if (!contentHtml) return '';
+  const $ = cheerio.load(contentHtml);
+  return $('img').first().attr('src') || '';
+}
+
+async function fetchMediaUrls(ids) {
+  const urls = new Map();
+  const unique = [...new Set(ids.filter(Boolean))];
+  for (let i = 0; i < unique.length; i += 100) {
+    const chunk = unique.slice(i, i + 100);
+    try {
+      const media = await getJson(`${WP_API}/media?per_page=100&include=${chunk.join(',')}&_fields=id,source_url,media_details`);
+      for (const m of media) {
+        const sizes = (m.media_details && m.media_details.sizes) || {};
+        const url = (sizes.large && sizes.large.source_url) ||
+                    (sizes.medium_large && sizes.medium_large.source_url) ||
+                    m.source_url;
+        if (url) urls.set(m.id, url);
+      }
+    } catch (err) {
+      console.log('Could not fetch media:', err.message);
+    }
+  }
+  return urls;
+}
+
+// Fetch latest Discogs Digs articles from the WordPress REST API
 async function fetchDigsData() {
-  let page;
   try {
-    // Use test data if enabled
     if (USE_TEST_DATA) {
       console.log('Using test data...');
-      for (const dig of testData) {
-        insertDig(
-          dig.link,
-          dig.title,
-          dig.description,
-          dig.pubDate,
-          dig.imageUrl,
-          dig.author
-        );
-      }
+      testData.forEach(upsertDig);
+      saveDatabase();
       console.log(`Successfully loaded ${testData.length} test articles`);
       return testData.length;
     }
-    
-    console.log('Fetching from Discogs with Puppeteer... (this may take a moment)');
-    
-    // Initialize browser if not already running
-    if (!browser) {
-      browser = await puppeteer.launch({
-        headless: 'new',
-        executablePath: process.env.CHROME_PATH || '/usr/bin/chromium-browser',
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--disable-gpu'
-        ]
-      });
-    }
-    
-    page = await browser.newPage();
-    
-    // Set viewport and user agent
-    await page.setViewport({ width: 1920, height: 1080 });
-    await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    
-    // Random delay to seem more human
-    const delay = 2000 + Math.random() * 3000;
-    await new Promise(resolve => setTimeout(resolve, delay));
-    
-    // Navigate to page
-    console.log('Navigating to Discogs Digs...');
-    await page.goto('https://www.discogs.com/digs', {
-      waitUntil: 'networkidle2',
-      timeout: 30000
-    });
-    
-    // Wait a bit for dynamic content
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    // Extract articles from the page
-    const result = await page.evaluate(() => {
-      const articles = [];
-      const skipped = [];
-      
-      // Collect elements from multiple selectors to avoid missing items when markup varies
-      const selectors = ['article', '.card', '.dig', '.post', '.ultp-block-content-wrap'];
-      const elements = [];
-      const seenElements = new Set();
-      const usedSelectors = new Set();
-      
-      selectors.forEach(selector => {
-        const found = Array.from(document.querySelectorAll(selector));
-        if (found.length > 0) {
-          usedSelectors.add(selector);
-        }
-        found.forEach(el => {
-          if (!seenElements.has(el)) {
-            seenElements.add(el);
-            elements.push(el);
-          }
-        });
-      });
-      
-      const normalizeLink = (raw) => {
-        if (!raw) return '';
-        try {
-          const url = new URL(raw, window.location.origin);
-          url.hash = '';
-          url.search = '';
-          // Fix accidental inlined source URL segments like /https-www.discogs.com-
-          url.pathname = url.pathname.replace(/\/https?-www\.discogs\.com-/, '/');
-          // Keep a single trailing slash for consistency
-          url.pathname = url.pathname.replace(/\/+$/, '/') || '/';
-          return url.toString();
-        } catch {
-          return raw.trim();
-        }
-      };
 
-      const getDescription = (container, title) => {
-        if (!container) return '';
-        
-        // Try multiple selectors for description text
-        const selectors = [
-          'p:not([class*="button"]):not([class*="link"])',
-          '.ultp-block-excerpt',
-          '.description',
-          '.excerpt', 
-          '[class*="description"]',
-          '[class*="excerpt"]',
-          '.c-card__copy',
-          '.c-card__text',
-          '[class*="summary"]',
-          '[class*="intro"]'
-        ];
-        
-        for (const sel of selectors) {
-          const descEl = container.querySelector(sel);
-          if (descEl && descEl.textContent) {
-            const txt = descEl.textContent.trim();
-            // Make sure it's not just the title and has reasonable length
-            if (txt.length > 20 && txt !== title && !txt.startsWith('http')) {
-              return txt;
-            }
-          }
-        }
-        
-        // Try to find text nodes directly in container (for cards where description is loose text)
-        const textNodes = [];
-        const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
-        let node;
-        while (node = walker.nextNode()) {
-          const text = node.textContent.trim();
-          if (text && text.length > 20 && text !== title && !text.startsWith('http')) {
-            textNodes.push(text);
-          }
-        }
-        if (textNodes.length > 0) {
-          // Find the longest meaningful text node
-          const longest = textNodes.sort((a, b) => b.length - a.length)[0];
-          if (longest && longest.length <= 400) return longest;
-        }
-        
-        // Last resort: extract text from container, excluding title
-        const text = (container.textContent || '').trim();
-        if (!text) return '';
-        const cleaned = text.replace(title || '', '').trim().replace(/\s+/g, ' ');
-        if (cleaned.length > 30 && cleaned.length <= 400) return cleaned;
-        return '';
-      };
-
-      const isArticleLink = (link) => {
-        if (!link) return false;
-        try {
-          const url = new URL(link, window.location.origin);
-          const parts = url.pathname.split('/').filter(Boolean); // e.g., ['digs','features','slug']
-          if (parts.length < 3) return false; // need /digs/<section>/<slug>
-          if (parts[0] !== 'digs') return false;
-          const section = parts[1];
-          if (!['features', 'music', 'collecting', 'gear'].includes(section)) return false;
-          const slug = parts[2];
-          return !!slug && slug.length > 2;
-        } catch {
-          return false;
-        }
-      };
-
-      const addArticle = ({ title, link, description, imageUrl, author, pubDate }) => {
-        if (!title || !link) return;
-        if (!isArticleLink(link)) return;
-        articles.push({ title, link, description, imageUrl, author, pubDate });
-      };
-
-      elements.forEach((element, index) => {
-        try {
-          // Try to find title
-          const titleEl = element.querySelector('h1, h2, h3, h4, .title, [class*="title"]');
-          const title = titleEl ? titleEl.textContent.trim() : '';
-          
-          // Try to find link (prefer the first anchor)
-          const linkEl = element.querySelector('a');
-          const link = normalizeLink(linkEl ? linkEl.href : '');
-          
-          // Try to find image - check multiple sources
-          let imageUrl = '';
-          const imgEl = element.querySelector('img');
-          if (imgEl) {
-            imageUrl = imgEl.src || imgEl.dataset.src || imgEl.getAttribute('data-lazy-src') || '';
-          }
-          // If no image in element, check if anchor contains an image
-          if (!imageUrl && linkEl) {
-            const anchorImg = linkEl.querySelector('img');
-            if (anchorImg) {
-              imageUrl = anchorImg.src || anchorImg.dataset.src || anchorImg.getAttribute('data-lazy-src') || '';
-            }
-          }
-          
-          // Try to find description
-          const description = getDescription(element, title);
-          
-          // Try to find author
-          const authorEl = element.querySelector('.author, .byline, [class*="author"]');
-          const author = authorEl ? authorEl.textContent.trim() : 'Discogs';
-          
-          // Try to find published date
-          const dateEl = element.querySelector('time, .date, .publish-date, [class*="date"]');
-          let pubDate = null;
-          if (dateEl) {
-            const datetime = dateEl.getAttribute('datetime') || dateEl.textContent.trim();
-            try {
-              pubDate = new Date(datetime).toISOString();
-            } catch {
-              pubDate = null;
-            }
-          }
-          
-          if (title && link) {
-            addArticle({ title, link, description, imageUrl, author, pubDate });
-          } else {
-            skipped.push({
-              index,
-              title: title || '(no title)',
-              link: link || '(no link)',
-              hasTitle: !!title,
-              hasLink: !!link
-            });
-          }
-        } catch (err) {
-          skipped.push({
-            index,
-            error: err.message
-          });
-        }
-      });
-
-      // Fallback: capture cards/tiles with links to /digs/ even if not wrapped in expected selectors
-      const cardAnchors = Array.from(document.querySelectorAll('a[href*="/digs/"]'));
-      cardAnchors.forEach((anchor, idx) => {
-        const link = normalizeLink(anchor.href);
-        if (!isArticleLink(link)) return;
-        const card = anchor.closest('article, .card, .tile, .post, li') || anchor.parentElement;
-        const titleEl = card ? card.querySelector('h1, h2, h3, h4, .title, [class*="title"]') : null;
-        const title = (titleEl ? titleEl.textContent : anchor.textContent || '').trim();
-        const description = getDescription(card || anchor, title);
-        
-        // Try multiple sources for image
-        let imageUrl = '';
-        if (card) {
-          const imgEl = card.querySelector('img');
-          if (imgEl) {
-            imageUrl = imgEl.src || imgEl.dataset.src || imgEl.getAttribute('data-lazy-src') || '';
-          }
-        }
-        if (!imageUrl && anchor) {
-          const anchorImg = anchor.querySelector('img');
-          if (anchorImg) {
-            imageUrl = anchorImg.src || anchorImg.dataset.src || anchorImg.getAttribute('data-lazy-src') || '';
-          }
-        }
-        
-        addArticle({ title, link, description, imageUrl, author: 'Discogs', pubDate: null });
-      });
-      
-      // Deduplicate by link on the client side, but merge data from duplicates
-      const articlesByLink = new Map();
-      const duplicateLinks = [];
-      
-      articles.forEach(a => {
-        if (!articlesByLink.has(a.link)) {
-          articlesByLink.set(a.link, a);
-        } else {
-          duplicateLinks.push(a);
-          // Merge: keep the best version of each field
-          const existing = articlesByLink.get(a.link);
-          
-          // Prefer longer/existing description
-          if (!existing.description && a.description) {
-            existing.description = a.description;
-          } else if (a.description && a.description.length > (existing.description || '').length) {
-            existing.description = a.description;
-          }
-          
-          // Prefer existing image URL
-          if (!existing.imageUrl && a.imageUrl) {
-            existing.imageUrl = a.imageUrl;
-          }
-          
-          // Prefer existing pubDate
-          if (!existing.pubDate && a.pubDate) {
-            existing.pubDate = a.pubDate;
-          }
-        }
-      });
-      
-      const uniqueArticles = Array.from(articlesByLink.values());
-      
-      return {
-        articles: uniqueArticles,
-        skipped,
-        duplicateLinks,
-        totalElements: elements.length,
-        usedSelectors: Array.from(usedSelectors)
-      };
-    });
-    
-    const digs = result.articles;
-    
-    console.log(`Found ${result.totalElements} elements using selectors ${JSON.stringify(result.usedSelectors)}`);
-    console.log(`Extracted ${digs.length} unique articles, skipped ${result.skipped.length}`);
-    console.log('--- Scraped articles (unique) ---');
-    digs.forEach((dig, i) => {
-      console.log(`  ${i + 1}. "${dig.title}"`);
-      console.log(`     ${dig.link}`);
-    });
-    
-    if (result.duplicateLinks && result.duplicateLinks.length > 0) {
-      console.log(`\n🔍 Client-side deduped ${result.duplicateLinks.length} repeated links in page markup:`);
-      result.duplicateLinks.forEach((dup, i) => {
-        console.log(`  ${i + 1}. "${dup.title}"`);
-        console.log(`     ${dup.link}`);
-      });
-    }
-
-    if (result.skipped.length > 0) {
-      console.log('Skipped elements:');
-      result.skipped.forEach(skip => {
-        if (skip.error) {
-          console.log(`  [${skip.index}] Error: ${skip.error}`);
-        } else {
-          console.log(`  [${skip.index}] title=${skip.hasTitle ? '✓' : '✗'}, link=${skip.hasLink ? '✓' : '✗'} - "${skip.title}"`);
-        }
-      });
-    }
-    
-    await page.close();
-    
-    // Store in database with detailed duplicate reporting (already-present in DB)
-    const existing = getAllDigs();
-    const beforeCount = existing.length;
-    const existingLinks = new Set(existing.map(d => d.link));
-    const existingTitleByLink = new Map(existing.map(d => [d.link, d.title]));
-    const duplicatesInDb = [];
-    
-    digs.forEach(dig => {
-      if (existingLinks.has(dig.link)) {
-        duplicatesInDb.push({
-          link: dig.link,
-          scrapedTitle: dig.title,
-          existingTitle: existingTitleByLink.get(dig.link) || '(unknown title)'
-        });
-      }
-      insertDig(
-        dig.link,
-        dig.title,
-        dig.description,
-        dig.pubDate,
-        dig.imageUrl,
-        dig.author
+    console.log('Fetching latest posts from Discogs Digs API...');
+    const posts = [];
+    for (let page = 1; page <= FETCH_PAGES; page++) {
+      const batch = await getJson(
+        `${WP_API}/posts?per_page=50&page=${page}&orderby=date&order=desc` +
+        '&_fields=id,date_gmt,link,title,excerpt,content,featured_media'
       );
-    });
-    const afterCount = getAllDigs().length;
-    const newArticles = afterCount - beforeCount;
-    
-    if (duplicatesInDb.length > 0) {
-      console.log(`\n⚠️ Already in database (skipped on insert): ${duplicatesInDb.length}`);
-      duplicatesInDb.forEach((dup, i) => {
-        console.log(`  ${i + 1}. scraped="${dup.scrapedTitle}"`);
-        console.log(`     link=${dup.link}`);
-        console.log(`     existing title in DB="${dup.existingTitle}"`);
-      });
+      posts.push(...batch);
+      if (batch.length < 50) break;
     }
-    
-    console.log(`Successfully fetched ${digs.length} digs from Discogs (${newArticles} new, ${digs.length - newArticles} duplicates)`);
+
+    const mediaUrls = await fetchMediaUrls(posts.map(p => p.featured_media));
+    const beforeLinks = new Set(getAllDigs().map(d => d.link));
+
+    const digs = posts.map(p => ({
+      link: p.link,
+      title: htmlToText(p.title && p.title.rendered),
+      description: htmlToText(p.excerpt && p.excerpt.rendered),
+      pubDate: p.date_gmt ? new Date(p.date_gmt + 'Z').toISOString() : null,
+      imageUrl: mediaUrls.get(p.featured_media) || firstImage(p.content && p.content.rendered),
+      author: extractByline(p.content && p.content.rendered) || 'Discogs',
+      content: cleanContent(p.content && p.content.rendered)
+    })).filter(d => d.link && d.title);
+
+    digs.forEach(upsertDig);
+    saveDatabase();
+
+    const newOnes = digs.filter(d => !beforeLinks.has(d.link));
+    console.log(`Fetched ${digs.length} articles from API (${newOnes.length} new)`);
+    newOnes.forEach(d => console.log(`  + ${d.pubDate}  ${d.title}`));
     return digs.length;
   } catch (error) {
     console.error('Error fetching digs:', error.message);
-    if (page) await page.close().catch(() => {});
-    
-    // Return count from database instead if fetch fails
-    const existingDigs = getAllDigs();
-    return existingDigs.length;
+    return getAllDigs().length;
   }
 }
 
 // Generate RSS feed
+function escapeXml(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+const cdata = s => `<![CDATA[${String(s || '').replace(/]]>/g, ']]]]><![CDATA[>')}]]>`;
+
 function generateRSS(digs) {
   const items = digs.map(dig => {
-    // Build content with image and description
     let content = '';
     if (dig.imageUrl) {
-      content += `<img src="${dig.imageUrl}" alt="${dig.title}" style="max-width: 100%; height: auto;"/><br/><br/>`;
+      content += `<img src="${escapeXml(dig.imageUrl)}" alt="${escapeXml(dig.title)}" style="max-width: 100%; height: auto;"/><br/><br/>`;
     }
-    if (dig.description) {
-      content += dig.description;
+    if (dig.content) {
+      content += dig.content;
+    } else if (dig.description) {
+      content += escapeXml(dig.description);
     }
-    
+
     return `
     <item>
-      <title><![CDATA[${dig.title}]]></title>
-      <link>${dig.link}</link>
-      <guid isPermaLink="true">${dig.link}</guid>
+      <title>${cdata(dig.title)}</title>
+      <link>${escapeXml(dig.link)}</link>
+      <guid isPermaLink="true">${escapeXml(dig.link)}</guid>
       <pubDate>${new Date(dig.pubDate).toUTCString()}</pubDate>
-      ${dig.author ? `<author>${dig.author}</author>` : ''}
-      ${dig.description ? `<description><![CDATA[${dig.description}]]></description>` : ''}
-      ${content ? `<content:encoded><![CDATA[${content}]]></content:encoded>` : ''}
-      ${dig.imageUrl ? `<enclosure url="${dig.imageUrl}" type="image/jpeg"/>` : ''}
+      ${dig.author ? `<dc:creator>${cdata(dig.author)}</dc:creator>` : ''}
+      ${dig.description ? `<description>${cdata(dig.description)}</description>` : ''}
+      ${content ? `<content:encoded>${cdata(content)}</content:encoded>` : ''}
+      ${dig.imageUrl ? `<enclosure url="${escapeXml(dig.imageUrl)}" length="0" type="image/jpeg"/>` : ''}
     </item>
   `;
   }).join('');
@@ -516,7 +289,8 @@ function generateRSS(digs) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" 
      xmlns:atom="http://www.w3.org/2005/Atom"
-     xmlns:content="http://purl.org/rss/1.0/modules/content/">
+     xmlns:content="http://purl.org/rss/1.0/modules/content/"
+     xmlns:dc="http://purl.org/dc/elements/1.1/">
   <channel>
     <title>Discogs Digs RSS Feed</title>
     <link>https://www.discogs.com/digs</link>
@@ -625,6 +399,7 @@ app.get('/reset', async (req, res) => {
         pubDate TEXT,
         imageUrl TEXT,
         author TEXT,
+        content TEXT,
         createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -677,9 +452,6 @@ startServer().catch(err => {
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('\nShutting down gracefully...');
-  if (browser) {
-    await browser.close();
-  }
   if (db) {
     db.close();
   }

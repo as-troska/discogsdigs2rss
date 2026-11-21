@@ -1,16 +1,4 @@
-FROM node:18-alpine
-
-# Install minimal dependencies for Puppeteer on Alpine
-RUN apk add --no-cache \
-    chromium \
-    nss \
-    freetype \
-    harfbuzz \
-    ca-certificates \
-    font-noto-cjk
-
-# Tell Puppeteer to skip Chromium download
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+FROM node:22-alpine
 
 # Set working directory
 WORKDIR /app
@@ -19,7 +7,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install Node dependencies
-RUN npm ci --only=production
+RUN npm ci --omit=dev
 
 # Copy app files (invalidate cache if any file changes)
 COPY app.js ./
