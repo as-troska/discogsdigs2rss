@@ -2,6 +2,7 @@ const express = require('express');
 const cheerio = require('cheerio');
 const initSqlJs = require('sql.js');
 const fs = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 const testData = require('./test-data');
 
@@ -41,8 +42,39 @@ async function initDatabase() {
   // Migrate older databases that lack the content column
   const cols = db.exec('PRAGMA table_info(digs)')[0].values.map(r => r[1]);
   if (!cols.includes('content')) db.run('ALTER TABLE digs ADD COLUMN content TEXT');
+
+  // Key/value store for status info (last check etc.)
+  db.run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)');
   
   saveDatabase();
+}
+
+function getMeta(key) {
+  const stmt = db.prepare('SELECT value FROM meta WHERE key = ?');
+  stmt.bind([key]);
+  const value = stmt.step() ? stmt.getAsObject().value : null;
+  stmt.free();
+  return value;
+}
+
+function setMeta(key, value) {
+  db.run('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', [key, String(value)]);
+}
+
+// Record the outcome of a fetch attempt
+function recordCheck(status, details) {
+  setMeta('lastCheck', new Date().toISOString());
+  setMeta('lastCheckStatus', status);
+  setMeta('lastCheckDetails', details);
+  if (status === 'ok') setMeta('lastSuccess', new Date().toISOString());
+  saveDatabase();
+}
+
+function checkStatusHtml() {
+  const status = getMeta('lastCheckStatus');
+  const icon = status === 'ok' ? '✅' : status === 'error' ? '❌' : '';
+  const details = escapeXml(getMeta('lastCheckDetails') || '');
+  return `${formatTimestamp(getMeta('lastCheck'))} ${icon} ${details}`.trim();
 }
 
 // Save database to disk
@@ -71,6 +103,17 @@ function upsertDig({ link, title, description, pubDate, imageUrl, author, conten
   } catch (error) {
     console.log('Error with article:', link, error.message);
   }
+}
+
+const DISPLAY_TZ = process.env.DISPLAY_TZ || process.env.TZ || 'Europe/Oslo';
+
+// SQLite CURRENT_TIMESTAMP is stored as UTC without a zone marker ("YYYY-MM-DD HH:MM:SS")
+function formatTimestamp(value) {
+  if (!value) return 'Never';
+  const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? value.replace(' ', 'T') + 'Z' : value;
+  const date = new Date(iso);
+  if (isNaN(date)) return String(value);
+  return date.toLocaleString('nb-NO', { timeZone: DISPLAY_TZ, dateStyle: 'short', timeStyle: 'medium' });
 }
 
 function getAllDigs() {
@@ -212,7 +255,7 @@ async function fetchDigsData() {
     if (USE_TEST_DATA) {
       console.log('Using test data...');
       testData.forEach(upsertDig);
-      saveDatabase();
+      recordCheck('ok', `${testData.length} test articles`);
       console.log(`Successfully loaded ${testData.length} test articles`);
       return testData.length;
     }
@@ -242,14 +285,15 @@ async function fetchDigsData() {
     })).filter(d => d.link && d.title);
 
     digs.forEach(upsertDig);
-    saveDatabase();
 
     const newOnes = digs.filter(d => !beforeLinks.has(d.link));
+    recordCheck('ok', `${digs.length} fetched, ${newOnes.length} new`);
     console.log(`Fetched ${digs.length} articles from API (${newOnes.length} new)`);
     newOnes.forEach(d => console.log(`  + ${d.pubDate}  ${d.title}`));
     return digs.length;
   } catch (error) {
     console.error('Error fetching digs:', error.message);
+    recordCheck('error', error.message);
     return getAllDigs().length;
   }
 }
@@ -317,7 +361,11 @@ app.get('/rss', async (req, res) => {
     // Generate RSS feed
     const rss = generateRSS(digs);
     
-    res.type('application/rss+xml; charset=utf-8');
+    // Browsers download application/rss+xml, so serve plain XML to them;
+    // feed readers (which don't ask for text/html) still get the RSS type.
+    const isBrowser = (req.get('Accept') || '').includes('text/html');
+    res.type(isBrowser ? 'text/xml; charset=utf-8' : 'application/rss+xml; charset=utf-8');
+    res.set('Vary', 'Accept');
     res.set('Content-Disposition', 'inline');
     res.send(rss);
   } catch (error) {
@@ -326,19 +374,93 @@ app.get('/rss', async (req, res) => {
   }
 });
 
+// Shared HTML page wrapper with styling
+function layout(title, content) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${title}</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #f5f5f7; --card: #fff; --text: #1d1d1f; --muted: #6e6e73; --border: #e3e3e8; --accent: #2563eb; --danger: #dc2626; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #111113; --card: #1c1c1f; --text: #ececf0; --muted: #9a9aa3; --border: #2c2c31; --accent: #60a5fa; --danger: #f87171; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 2rem 1rem; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    main { max-width: 640px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin: 0 0 1.5rem; }
+    h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 .75rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: .5rem 1.5rem; margin: 0; }
+    dt { color: var(--muted); }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    code { font-size: .85em; }
+    .actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+    .btn { display: inline-block; padding: .5rem .9rem; border-radius: 8px; border: 1px solid var(--border); color: var(--text); text-decoration: none; font-weight: 500; }
+    .btn:hover { border-color: var(--accent); color: var(--accent); }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.primary:hover { filter: brightness(1.1); color: #fff; }
+    .btn.danger { color: var(--danger); }
+    .btn.danger:hover { border-color: var(--danger); background: var(--danger); color: #fff; }
+    a:not(.btn) { color: var(--accent); }
+    .lead { margin: 0 0 1rem; }
+    .footer { text-align: center; color: var(--muted); font-size: .9rem; }
+  </style>
+</head>
+<body>
+<main>
+${content}
+</main>
+</body>
+</html>`;
+}
+
 app.get('/', (req, res) => {
   const digs = getAllDigs();
-  const lastUpdate = digs.length > 0 ? new Date(digs[0].createdAt).toLocaleString() : 'Never';
-  res.send(`
-    <h1>Discogs Digs RSS Feed</h1>
-    <p>📡 RSS feed available at: <a href="/rss">/rss</a></p>
-    <p>📰 Articles in database: <strong>${digs.length}</strong></p>
-    <p>🕐 Last update: ${lastUpdate}</p>
-    <p>⏰ Auto-updates every 2 hours</p>
-    <hr>
-    <p><a href="/admin">⚙️ Admin Panel</a> - View status, force update, reset database</p>
-  `);
+  const lastUpdate = digs.length > 0 ? formatTimestamp(digs[0].createdAt) : 'Never';
+  res.send(layout('Discogs Digs RSS', `
+  <h1>🎧 Discogs Digs RSS</h1>
+
+  <section class="card">
+    <h2>Feed</h2>
+    <p class="lead">Unofficial RSS feed for <a href="https://www.discogs.com/digs/">Discogs Digs</a>, with full article content.</p>
+    <div class="actions">
+      <a class="btn primary" href="/rss">📡 Open RSS feed</a>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Status</h2>
+    <dl>
+      <dt>Articles in database</dt><dd><strong>${digs.length}</strong></dd>
+      <dt>Last check</dt><dd>${checkStatusHtml()}</dd>
+      <dt>Newest article added</dt><dd>${lastUpdate}</dd>
+      <dt>Update interval</dt><dd>Every 2 hours (automatic)</dd>
+    </dl>
+  </section>
+
+  <p class="footer"><a href="/admin">⚙️ Admin panel</a></p>
+`));
 });
+
+// Basic auth for admin routes. Any username; password from ADMIN_PASSWORD.
+// If no password is configured, admin routes are disabled.
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+
+function requireAdmin(req, res, next) {
+  if (!ADMIN_PASSWORD) return res.status(503).send('Admin disabled: ADMIN_PASSWORD is not set.');
+  const [scheme, encoded] = (req.get('Authorization') || '').split(' ');
+  const password = scheme === 'Basic' && encoded
+    ? Buffer.from(encoded, 'base64').toString().split(':').slice(1).join(':')
+    : '';
+  const a = crypto.createHash('sha256').update(password).digest();
+  const b = crypto.createHash('sha256').update(ADMIN_PASSWORD).digest();
+  if (crypto.timingSafeEqual(a, b)) return next();
+  res.set('WWW-Authenticate', 'Basic realm="Discogs Digs RSS admin", charset="UTF-8"');
+  res.status(401).send('Authentication required');
+}
+
+app.use(['/admin', '/update', '/reset'], requireAdmin);
 
 app.get('/update', async (req, res) => {
   try {
@@ -352,28 +474,33 @@ app.get('/update', async (req, res) => {
 
 app.get('/admin', (req, res) => {
   const digs = getAllDigs();
-  const lastUpdate = digs.length > 0 ? new Date(digs[0].createdAt).toLocaleString() : 'Never';
+  const lastUpdate = digs.length > 0 ? formatTimestamp(digs[0].createdAt) : 'Never';
   
-  res.send(`
-    <h1>Discogs Digs RSS - Admin Panel</h1>
-    <h2>Database Status</h2>
-    <p><strong>Articles in database:</strong> ${digs.length}</p>
-    <p><strong>Last update:</strong> ${lastUpdate}</p>
-    <p><strong>Database file:</strong> ${DB_PATH}</p>
-    <p><strong>Update interval:</strong> Every 2 hours (automatic)</p>
-    
+  res.send(layout('Admin – Discogs Digs RSS', `
+  <h1>🎧 Discogs Digs RSS – Admin</h1>
+
+  <section class="card">
+    <h2>Status</h2>
+    <dl>
+      <dt>Articles in database</dt><dd><strong>${digs.length}</strong></dd>
+      <dt>Last check</dt><dd>${checkStatusHtml()}</dd>
+      <dt>Last successful check</dt><dd>${formatTimestamp(getMeta('lastSuccess'))}</dd>
+      <dt>Newest article added</dt><dd>${lastUpdate}</dd>
+      <dt>Update interval</dt><dd>Every 2 hours (automatic)</dd>
+      <dt>Database file</dt><dd><code>${DB_PATH}</code></dd>
+    </dl>
+  </section>
+
+  <section class="card">
     <h2>Actions</h2>
-    <ul>
-      <li><a href="/update">🔄 Force Update Now</a> (fetch latest articles)</li>
-      <li><a href="/reset" onclick="return confirm('Are you SURE? This will DELETE all ${digs.length} articles and reset the database!');">🗑️ Reset Database</a> (WARNING: This deletes everything!)</li>
-    </ul>
-    
-    <h2>Links</h2>
-    <ul>
-      <li><a href="/">📰 Home</a></li>
-      <li><a href="/rss">📡 RSS Feed</a></li>
-    </ul>
-  `);
+    <div class="actions">
+      <a class="btn primary" href="/update">🔄 Force update now</a>
+      <a class="btn" href="/rss">📡 RSS feed</a>
+      <a class="btn" href="/">📰 Home</a>
+      <a class="btn danger" href="/reset" onclick="return confirm('Are you SURE? This will DELETE all ${digs.length} articles and reset the database!');">🗑️ Reset database</a>
+    </div>
+  </section>
+`));
 });
 
 app.get('/reset', async (req, res) => {

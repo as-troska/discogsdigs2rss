@@ -12,6 +12,8 @@ services:
       - DATA_DIR=data
       - NODE_ENV=production
       - PORT=3000
+      - TZ=Europe/Oslo
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
     restart: unless-stopped
     logging:
       driver: "json-file"
